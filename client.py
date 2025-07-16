@@ -635,36 +635,90 @@ class GameClient:
             self.send_move([new_x, new_y])
     
     def _update_player_positions(self):
-        # 更新其他玩家的位置插值
+        """更新其他玩家的位置插值 - 优化版，更平滑的移动"""
         current_time = time.time()
+
+        # 为每个玩家进行位置插值处理
         for player_id, pos_data in self.player_positions.items():
             if player_id in self.game_state.get("players", {}):
-                # 计算过渡进度 (根据时间差异和最大过渡时间)
+                # 计算自上次更新以来的时间
                 elapsed = current_time - pos_data["last_update"]
-                max_transition_time = 0.2  # 200毫秒内完成过渡
-                progress = min(1.0, elapsed / max_transition_time)
-                
-                # 使用缓动函数使移动更自然
-                # 使用easeOutQuad缓动: progress = 1 - (1 - progress) * (1 - progress)
-                eased_progress = 1 - (1 - progress) * (1 - progress)
-                
-                # 使用线性插值平滑移动
+
+                # 使用更长的过渡时间，使移动更平滑
+                max_transition_time = 0.3  # 增加到300毫秒，减少抖动
+
+                # 计算插值进度，但不要完全达到1.0，保留小余量以平滑连接下一次更新
+                progress = min(0.99, elapsed / max_transition_time)
+
+                # 使用更平滑的缓动函数
+                # easeOutCubic: 在结束阶段减速更多，使运动更自然
+                eased_progress = 1 - (1 - progress) ** 3
+
+                # 当前位置和目标位置
                 current_x = pos_data["current"][0]
                 current_y = pos_data["current"][1]
                 target_x = pos_data["target"][0]
                 target_y = pos_data["target"][1]
-                
-                # 计算新的当前位置
-                new_x = current_x + (target_x - current_x) * eased_progress
-                new_y = current_y + (target_y - current_y) * eased_progress
-                
+
+                # 计算位置差值
+                diff_x = target_x - current_x
+                diff_y = target_y - current_y
+
+                # 应用速度预测 - 存储移动速度以便预测未来位置
+                if "velocity" not in pos_data:
+                    pos_data["velocity"] = [0, 0]
+                    pos_data["last_positions"] = []
+
+                # 如果距离大于某个阈值，应该是传送而非正常移动，直接设置位置
+                distance = math.sqrt(diff_x**2 + diff_y**2)
+                if distance > 200:  # 如果距离超过200像素，考虑为传送
+                    new_x = target_x
+                    new_y = target_y
+                    # 重置速度，因为这是传送而非连续移动
+                    pos_data["velocity"] = [0, 0]
+                    pos_data["last_positions"] = []
+                else:
+                    # 正常移动 - 使用平滑插值
+                    # 维护位置历史记录用于计算平均速度
+                    pos_data["last_positions"].append({
+                        "pos": [current_x, current_y],
+                        "time": current_time
+                    })
+
+                    # 仅保留最近的5个位置记录
+                    if len(pos_data["last_positions"]) > 5:
+                        pos_data["last_positions"].pop(0)
+
+                    # 根据历史位置计算平均速度
+                    if len(pos_data["last_positions"]) > 1:
+                        oldest = pos_data["last_positions"][0]
+                        time_diff = current_time - oldest["time"]
+                        if time_diff > 0.01:  # 避免除以接近0的数
+                            avg_vx = (current_x - oldest["pos"][0]) / time_diff
+                            avg_vy = (current_y - oldest["pos"][1]) / time_diff
+                            # 平滑速度变化，避免突变
+                            pos_data["velocity"][0] = pos_data["velocity"][0] * 0.7 + avg_vx * 0.3
+                            pos_data["velocity"][1] = pos_data["velocity"][1] * 0.7 + avg_vy * 0.3
+
+                    # 使用当前速度进行位置预测
+                    # 这能减少网络延迟的影响，使移动更流畅
+                    pred_factor = max(0, min(0.2, elapsed * 0.5))  # 有限的预测因子
+                    pred_x = target_x + pos_data["velocity"][0] * pred_factor
+                    pred_y = target_y + pos_data["velocity"][1] * pred_factor
+
+                    # 计算插值后的新位置
+                    # 使用目标位置与预测位置的混合
+                    blend_factor = 0.7  # 目标位置的权重
+                    interp_target_x = target_x * blend_factor + pred_x * (1-blend_factor)
+                    interp_target_y = target_y * blend_factor + pred_y * (1-blend_factor)
+
+                    # 应用缓动插值
+                    new_x = current_x + (interp_target_x - current_x) * eased_progress
+                    new_y = current_y + (interp_target_y - current_y) * eased_progress
+
                 # 更新当前位置
                 pos_data["current"] = [new_x, new_y]
-                
-                # 如果已经足够接近目标位置，则直接设置为目标位置
-                if progress >= 0.98:
-                    pos_data["current"] = pos_data["target"].copy()
-                
+
                 # 更新游戏状态中的位置以便绘制
                 self.game_state["players"][player_id]["position"] = pos_data["current"].copy()
     
