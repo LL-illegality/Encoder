@@ -65,6 +65,51 @@ class GameServer:
             pass
         print("服务器已关闭")
 
+
+    def _extract_json_object(self, buffer):
+        """从缓冲区提取一个完整的JSON对象"""
+        # 查找JSON对象的开始
+        start_pos = buffer.find('{')
+        if start_pos == -1:
+            return None, 0
+
+        # 跟踪大括号的嵌套层次
+        brace_count = 0
+        in_string = False
+        escape_char = False
+
+        for i in range(start_pos, len(buffer)):
+            char = buffer[i]
+
+            # 处理字符串中的字符
+            if in_string:
+                if char == '\\' and not escape_char:
+                    escape_char = True
+                    continue
+                if char == '"' and not escape_char:
+                    in_string = False
+                escape_char = False
+                continue
+
+            # 处理字符串外的字符
+            if char == '"':
+                in_string = True
+            elif char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+
+            # 找到完整的JSON对象
+            if brace_count == 0 and i > start_pos:
+                try:
+                    obj = json.loads(buffer[start_pos:i+1])
+                    return obj, i+1
+                except:
+                    pass
+
+        return None, 0
+
+
     def handle_client(self, client_socket, client_address):
         # 处理客户端连接和消息
         client_id = None
@@ -122,42 +167,43 @@ class GameServer:
                 print(f"客户端 {client_id} ({username}) 已连接: {client_address}")
 
                 # 处理客户端消息
-                while self.running:
-                    data = client_socket.recv(1024).decode('utf-8')
-                    if not data:
-                        break
+                # 使用缓冲区来处理可能跨多个数据包的消息
+                buffer = ""
 
+                while self.running:
                     try:
-                        # 尝试处理可能连在一起的多个JSON消息
-                        remaining_data = data
-                        while remaining_data.strip():
-                            try:
-                                # 尝试解析一个完整的JSON对象
-                                message = json.loads(remaining_data)
-                                self.process_message(client_id, message)
-                                break  # 成功解析整个字符串，退出循环
-                            except json.JSONDecodeError as e:
-                                # 如果错误位置信息可用，尝试分割数据
-                                if hasattr(e, 'pos'):
-                                    # 尝试在错误位置找到JSON对象的结束位置
-                                    pos = e.pos
-                                    # 尝试解析第一部分
-                                    try:
-                                        first_part = remaining_data[:pos]
-                                        message = json.loads(first_part)
-                                        self.process_message(client_id, message)
-                                        # 处理剩余部分
-                                        remaining_data = remaining_data[pos:]
-                                    except:
-                                        # 如果无法处理，终止循环
-                                        print(f"无法解析部分JSON数据: {remaining_data}")
-                                        break
-                                else:
-                                    # 无法确定错误位置，放弃处理
-                                    print(f"收到无效的JSON数据: {remaining_data}")
-                                    break
+                        # 接收数据
+                        data = client_socket.recv(4096).decode('utf-8')
+                        if not data:
+                            break
+
+                        # 将接收的数据添加到缓冲区
+                        buffer += data
+
+                        # 尝试解析多个完整的JSON消息
+                        while buffer:
+                            # 尝试找到一个完整的JSON对象
+                            obj, index = self._extract_json_object(buffer)
+                            if not obj:
+                                # 如果没有找到完整的JSON对象，等待更多数据
+                                break
+
+                            # 处理消息
+                            self.process_message(client_id, obj)
+
+                            # 从缓冲区中删除已处理的消息
+                            buffer = buffer[index:]
+
+                            # 如果缓冲区只剩下空白字符，清空它
+                            if buffer.strip() == "":
+                                buffer = ""
+                                break
+
                     except Exception as e:
-                        print(f"处理JSON数据时出错: {e}\n数据: {data}")
+                        # 出错时记录日志，但不终止循环
+                        print(f"接收或处理消息时出错: {e}")
+                        # 清除缓冲区，防止持续错误
+                        buffer = ""
 
         except Exception as e:
             print(f"处理客户端 {client_id} 时出错: {e}")
