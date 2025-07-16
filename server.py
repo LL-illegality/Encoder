@@ -611,33 +611,36 @@ class GameServer:
                 # 倒等腰三角形的行数需要是1, 3, 6, 10, 15, 21, 28...
                 triangle_rows = [1, 3, 6, 10, 15, 21, 28]
                 # 根据玩家值选择行数，值越大行数越少
-                num_bullets = 1
-                row_index = min(len(triangle_rows) - 1, 6 - (player_value // 40))
+                num_bullets = 0
+                row_index = min(len(triangle_rows) - 1, max(int((len(triangle_rows)-1) * (1 - player_value / 255)), 1))
                 for i in range(row_index):
-                    num_bullets = triangle_rows[row_index - i]
+                    num_bullets += triangle_rows[i]
 
                 # 计算子弹伤害（1-32）
-                bullet_damage = max(1, min(32, 32 // num_bullets))
+                bullet_damage = max(1, min(48, int(48 * (player_value / 255) / num_bullets)))
 
                 # 计算子弹速度（基础速度 + 根据玩家值增加）
-                bullet_speed_base = 100
+                bullet_speed_base = 200
                 bullet_speed_factor = player_value / 255 * 300  # 最多增加7的速度
                 bullet_speed = bullet_speed_base + bullet_speed_factor
+                row_speed_subtract = 1
 
                 # 创建子弹阵列（倒等腰三角形）
                 bullets_created = []
                 current_row = 1
                 total_bullets = 0
-                spread_angle = 0.2  # 子弹扩散角度
+                spread_angle_init = 3.14 / 6  # 子弹扩散角度
 
                 # 创建倒等腰三角形的子弹阵列
                 while total_bullets < num_bullets:
-                    for i in range(current_row):
+                    num_row_bullets = triangle_rows[current_row - 1]
+                    for i in range(num_row_bullets):
                         if total_bullets >= num_bullets:
                             break
 
                         # 计算扩散角度，使子弹形成三角形
-                        angle_offset = (i - (current_row - 1) / 2) * spread_angle
+                        spread_angle = spread_angle_init / num_row_bullets
+                        angle_offset = (i - (num_row_bullets - 1) / 2) * spread_angle
 
                         # 计算旋转后的方向
                         try:
@@ -651,12 +654,13 @@ class GameServer:
                             # 出现任何错误时使用默认方向
                             rotated_dx, rotated_dy = 1.0, 0.0
 
+                        row_speed_subtract = bullet_speed / 1000 * current_row  # 每行速度递减10%
                         # 创建子弹对象
                         bullet = {
                             "id": self.bullet_id_counter,
                             "owner": client_id,
                             "position": player_pos.copy(),  # 从玩家位置发射
-                            "velocity": [rotated_dx * bullet_speed, rotated_dy * bullet_speed],
+                            "velocity": [(rotated_dx * bullet_speed) * (row_speed_subtract), (rotated_dy * bullet_speed) * (row_speed_subtract)],
                             "damage": bullet_damage,
                             "created_time": time.time(),
                             "char": "*",  # 子弹字符

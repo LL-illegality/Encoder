@@ -83,14 +83,14 @@ class GameClient:
         
         # 十六进制模式技能相关属性
         self.hex_skills = [
-            {"name": "取址", "symbol": "&", "description": "标记当前位置", "color": (100, 150, 255), "key": self.keybindings["skill_1"]},
-            {"name": "寻址", "symbol": "*", "description": "传送到标记的位置", "color": (150, 100, 255), "key": self.keybindings["skill_2"]}
+            {"name": "取址", "symbol": "&", "description": "设置指针标记当前位置", "color": (100, 150, 255), "key": self.keybindings["skill_1"]},
+            {"name": "寻址", "symbol": "*", "description": "传送到指针标记的位置", "color": (150, 100, 255), "key": self.keybindings["skill_2"]}
         ]
         self.decimal_skills = [
             {"name": "赋值", "symbol": "=", "description": "为自己赋予随机值", "color": (255, 150, 100), "key": self.keybindings["skill_1"]},
-            {"name": "开火", "symbol": "fire()", "description": "向前方发射能量", "color": (200, 100, 255), "key": self.keybindings["skill_2"]},
+            {"name": "开火", "symbol": "fire()", "description": "向目标发射子弹", "color": (200, 100, 255), "key": self.keybindings["skill_2"]},
             {"name": "爆炸", "symbol": "*args", "description": "释放爆炸冲击波", "color": (255, 100, 100), "key": self.keybindings["skill_3"]},
-            {"name": "内存释放", "symbol": "</>", "description": "释放内存并恢复能量", "color": (150, 255, 100), "key": self.keybindings["skill_4"]}
+            {"name": "内存释放", "symbol": "</>", "description": "进入内存释放状态", "color": (150, 255, 100), "key": self.keybindings["skill_4"]}
         ]
         self.memory_usage = 0  # 当前内存占用(0-255)
         self.max_memory = 255  # 最大内存占用
@@ -776,6 +776,8 @@ class GameClient:
             
             # 绘制粒子效果
             self._draw_particles()
+            # 平滑处理子弹移动，解决回弹问题
+            self._smooth_bullet_movement()
             # 渲染子弹
             self._render_bullets()
 
@@ -984,8 +986,12 @@ class GameClient:
                 current_pos[0] += dx
                 current_pos[1] += dy
             
-            # 获取子弹位置
-            bullet_pos = bullet_data["current_position"]
+            # 获取子弹位置 - 优先使用渲染位置以实现平滑效果
+            # 如果存在渲染位置，使用渲染位置；否则使用物理位置
+            if "render_position" in bullet_data:
+                bullet_pos = bullet_data["render_position"]
+            else:
+                bullet_pos = bullet_data["current_position"]
             
             # 计算屏幕上的位置（应用摄像机偏移）
             screen_x = bullet_pos[0] - self.camera_offset_x
@@ -1001,7 +1007,7 @@ class GameClient:
                 
                 # 根据伤害值确定子弹大小
                 bullet_damage = bullet.get("damage", 1)
-                bullet_size = min(30, max(10, bullet_damage * 3))  # 大小范围在10-30之间
+                bullet_size = min(100, max(20, bullet_damage * 3))  # 大小范围在10-30之间
                 
                 # 创建子弹字体
                 bullet_font = pygame.font.SysFont("Consolas", int(bullet_size), bold=True)
@@ -1024,16 +1030,18 @@ class GameClient:
                 trail_chance = min(0.8, max(0.3, velocity_mag / 200))
                 
                 # 基于实际FPS调整尾迹生成频率，保持视觉一致性
-                if not hasattr(self, "frame_time_smoother"):
-                    self.frame_time_smoother = 0.016  # 初始化为60FPS
+                if not hasattr(self, "bullet_smoothness"):
+                    self.bullet_smoothness = 0.016
                 
                 # 平滑帧时间（避免帧率波动导致尾迹突变）
                 if hasattr(self, "last_render_time"):
                     actual_delta = current_time - self.last_render_time
-                    self.frame_time_smoother = self.frame_time_smoother * 0.9 + actual_delta * 0.1
+                    actual_delta = min(0.1, max(0.001, actual_delta))  # 限制在1-100fps范围内
+                    # 粒子运动使用固定帧时间，保持恒定速度
+                    # 子弹平滑使用实际帧时间平滑值
+                    self.bullet_smoothness = self.bullet_smoothness * 0.9 + actual_delta * 0.1
                 
-                # 根据实际帧率调整尾迹生成概率
-                frame_adjust = min(2.0, max(0.5, 0.016 / max(0.001, self.frame_time_smoother)))
+                frame_adjust = min(2.0, max(0.5, 0.016 / max(0.001, self.bullet_smoothness)))
                 trail_chance *= frame_adjust
                 
                 if random.random() < trail_chance:
@@ -1071,6 +1079,57 @@ class GameClient:
                         "type": "particle"
                     }
                     self.particles.append(trail_particle)
+
+    def _smooth_bullet_movement(self):
+        """处理子弹的平滑移动，解决回弹问题"""
+        current_time = time.time()
+
+        # 如果没有子弹，直接返回
+        if not self.interpolated_bullets:
+            return
+
+        # 计算实际帧时间
+        if not hasattr(self, "last_bullet_update_time"):
+            self.last_bullet_update_time = current_time
+
+        delta_time = current_time - self.last_bullet_update_time
+        self.last_bullet_update_time = current_time
+
+        # 限制delta_time在合理范围内
+        delta_time = min(0.05, max(0.001, delta_time))  # 20-1000fps范围
+
+        for bullet_data in self.interpolated_bullets:
+            bullet = bullet_data["bullet_data"]
+            velocity = bullet.get("velocity", [0, 0])
+
+            # 只处理有速度的子弹
+            if "velocity" in bullet and (velocity[0] != 0 or velocity[1] != 0):
+                # 如果没有渲染位置，初始化
+                if "render_position" not in bullet_data:
+                    bullet_data["render_position"] = bullet_data["current_position"].copy()
+
+                # 获取物理位置和渲染位置
+                physics_pos = bullet_data["current_position"]
+                render_pos = bullet_data["render_position"]
+
+                # 计算位置差异
+                diff_x = physics_pos[0] - render_pos[0]
+                diff_y = physics_pos[1] - render_pos[1]
+
+                # 使用平滑插值因子，渲染位置逐渐追上物理位置
+                # 移动速度快的子弹，插值更快，使其看起来更准确
+                speed = math.sqrt(velocity[0]**2 + velocity[1]**2)
+                smoothness = min(1.0, max(0.2, delta_time * 10 * (speed / 100)))
+
+                # 更新渲染位置
+                render_pos[0] += diff_x * smoothness
+                render_pos[1] += diff_y * smoothness
+
+                # 使用速度预测渲染位置的微小偏移，使运动更加流畅
+                # 这个偏移量很小，只是为了视觉上更平滑
+                prediction_factor = delta_time * 0.5  # 轻微的预测
+                render_pos[0] += velocity[0] * prediction_factor
+                render_pos[1] += velocity[1] * prediction_factor
 
     def _draw_particles(self):
         # 绘制粒子效果
@@ -1201,34 +1260,6 @@ class GameClient:
                                 dx = particle["dx"].real if isinstance(particle["dx"], complex) else particle["dx"]
                                 dy = particle["dy"].real if isinstance(particle["dy"], complex) else particle["dy"]
                                 # 确保平方和为正数，避免复数
-                                square_sum = max(0.01, dx**2 + dy**2)  # 保证平方和为正
-                                mag = math.sqrt(square_sum)
-                                norm_dx = -dx / mag  # 反向，尾迹在运动方向后方
-                                norm_dy = -dy / mag
-                            
-                                # 尾迹长度随速度变化
-                                # 确保mag是实数且为正值
-                                safe_mag = abs(mag) if isinstance(mag, complex) else mag
-                                trail_len = min(size, safe_mag * 2)
-                            
-                                # 尾迹起点和终点
-                                start_x, start_y = center
-                                # 确保使用实数计算
-                                safe_norm_dx = norm_dx.real if isinstance(norm_dx, complex) else norm_dx
-                                safe_norm_dy = norm_dy.real if isinstance(norm_dy, complex) else norm_dy
-                                end_x = start_x + safe_norm_dx * trail_len
-                                end_y = start_y + safe_norm_dy * trail_len
-                            
-                                # 尾迹颜色（半透明）
-                                trail_alpha = max(0, min(128, int(safe_alpha * 0.7)))
-                                trail_color = (r, g, b, trail_alpha)
-                            
-                                # 绘制渐变尾迹线条
-                                # if trail_len > 1:
-                                #     pygame.draw.line(particle_surface, trail_color, 
-                                #                     (start_x, start_y), 
-                                #                     (end_x, end_y), 
-                                #                     max(1, int(size/3)))
                         
                         # 渲染到屏幕
                         self.screen.blit(particle_surface, (screen_x - blur_size/2, screen_y - blur_size/2))
@@ -1237,8 +1268,6 @@ class GameClient:
                 if particle.get("type") != "fire_text":
                     # 获取当前帧时间差，用于平滑移动
                     frame_time = 1/60
-                    if hasattr(self, "frame_time_smoother"):
-                        frame_time = self.frame_time_smoother
                     
                     # 计算移动衰减系数 - 确保不会产生负值或复数
                     safe_progress = min(1.0, max(0.0, progress))  # 限制progress在0.0-1.0之间
